@@ -28,6 +28,7 @@ my @b;
 foreach my $i (0..@A/2-1) { $a[$i] = { L_BLK => $A[2*$i], LEN => $A[2*$i+1] } };
 foreach my $i (0..@B/2-1) { $b[$i] = { L_BLK => $B[2*$i], LEN => $B[2*$i+1] } };
 
+<<<<<<< HEAD
 # Merge adjacent extents in array E.
 sub merge_extents($)
 {
@@ -69,6 +70,32 @@ while (defined $a[$i])
             . "  [$i]=$b[$i]->{L_BLK} $b[$i]->{LEN}\n";
       }
     $i++;
+=======
+my $i = 0;
+my $j = 0;
+while (1)
+  {
+    !defined $a[$i] && !defined $b[$j]
+      and exit 0;
+    defined $a[$i] && defined $b[$j]
+      or die "\@a and \@b have different lengths, even after adjustment\n";
+    ($a[$i]->{L_BLK} == $b[$j]->{L_BLK}
+     && $a[$i]->{LEN} == $b[$j]->{LEN})
+      and next;
+    ($a[$i]->{LEN} < $b[$j]->{LEN}
+     && exists $a[$i+1] && $a[$i]->{LEN} + $a[$i+1]->{LEN} == $b[$j]->{LEN})
+      and ++$i, next;
+    exists $b[$j+1] && $a[$i]->{LEN} == $b[$i]->{LEN} + $b[$i+1]->{LEN}
+      and ++$j, next;
+    die "differing extent:\n"
+      . "  [$i]=$a[$i]->{L_BLK} $a[$i]->{LEN}\n"
+      . "  [$j]=$b[$j]->{L_BLK} $b[$j]->{LEN}\n"
+  }
+continue
+  {
+    ++$i;
+    ++$j;
+>>>>>>> fiemap-copy
   }
 
 ### Setup "GNU" style for perl-mode and cperl-mode.

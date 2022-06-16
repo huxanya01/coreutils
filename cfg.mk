@@ -76,8 +76,8 @@ sc_dd_O_FLAGS:
 dd_c = $(srcdir)/src/dd.c
 sc_dd_max_sym_length:
 ifneq ($(wildcard $(dd_c)),)
-	@len=$$( (sed -n '/conversions\[\] =$$/,/^};/p' $(dd_c);\
-		 sed -n '/flags\[\] =$$/,/^};/p' $(dd_c) )	\
+	@len=$$( (sed -n '/conversions\[] =$$/,/^};/p' $(dd_c);\
+		 sed -n '/flags\[] =$$/,/^};/p' $(dd_c) )	\
 		|sed -n '/"/s/^[^"]*"\([^"]*\)".*/\1/p'| wc -L);\
 	max=$$(sed -n '/^#define LONGEST_SYMBOL /s///p' $(dd_c)	\
 	      |tr -d '"' | wc -L);		\
@@ -98,11 +98,24 @@ sc_prohibit_jm_in_m4:
 
 # Ensure that each root-requiring test is run via the "check-root" rule.
 sc_root_tests:
+<<<<<<< HEAD
 	@t1=sc-root.expected; t2=sc-root.actual;			\
 	grep -nl '^ *require_root_$$' `$(VC_LIST) tests` |		\
 	  sed 's|.*/tests/|tests/|' | sort > $$t1;			\
 	for t in $(all_root_tests); do echo $$t; done | sort > $$t2;	\
 	st=0; diff -u $$t1 $$t2 || st=1;				\
+=======
+	@if test -d tests \
+	      && grep check-root tests/Makefile.am>/dev/null 2>&1; then \
+	t1=sc-root.expected; t2=sc-root.actual;				\
+	grep -nl '^ *require_root_$$'					\
+	  $$($(VC_LIST) tests) |sed s,tests/,, |sort > $$t1;		\
+	sed -n '/^root_tests =[	 ]*\\$$/,/[^\]$$/p'			\
+	  $(srcdir)/tests/Makefile.am					\
+	    | sed 's/^  *//;/^root_tests =/d'				\
+	    | tr -s '\012\\' '  ' | fmt -1 | sort > $$t2;		\
+	diff -u $$t1 $$t2 || diff=1 || diff=;				\
+>>>>>>> fiemap-copy
 	rm -f $$t1 $$t2;						\
 	exit $$st
 
@@ -496,7 +509,7 @@ sc_ensure_comma_after_id_est:
 # a period.  Check the first line after each "SEE ALSO" line in man/*.x:
 sc_prohibit_man_see_also_period:
 	@grep -nB1 '\.$$' $$($(VC_LIST_EXCEPT) | grep 'man/.*\.x$$')	\
-	    | grep -A1 -e '-\[SEE ALSO\]' | grep '\.$$' &&		\
+	    | grep -A1 -e '-\[SEE ALSO]' | grep '\.$$' &&		\
 	  { echo '$(ME): do not end "SEE ALSO" section with a period'	\
 	      1>&2; exit 1; } || :
 

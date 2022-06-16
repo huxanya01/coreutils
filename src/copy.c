@@ -80,9 +80,19 @@
 # include <linux/falloc.h>
 #endif
 
+<<<<<<< HEAD
 /* See HAVE_FALLOCATE workaround when including this file.  */
 #ifdef HAVE_LINUX_FS_H
 # include <linux/fs.h>
+=======
+#ifndef HAVE_FIEMAP
+# include "fiemap.h"
+#endif
+
+#ifndef HAVE_FCHOWN
+# define HAVE_FCHOWN false
+# define fchown(fd, uid, gid) (-1)
+>>>>>>> fiemap-copy
 #endif
 
 #if !defined FICLONE && defined __linux__
@@ -408,6 +418,7 @@ clone_file (int dest_fd, int src_fd)
 #endif
 }
 
+<<<<<<< HEAD
 /* Write N_BYTES zero bytes to file descriptor FD.  Return true if successful.
    Upon write failure, set errno and return false.  */
 static bool
@@ -581,6 +592,153 @@ lseek_copy (int src_fd, int dest_fd, char **abuf, size_t buf_size,
   error (0, errno, _("cannot lseek %s"), quoteaf (src_name));
   return false;
 }
+=======
+#ifdef __linux__
+# ifndef FS_IOC_FIEMAP
+#  define FS_IOC_FIEMAP _IOWR ('f', 11, struct fiemap)
+# endif
+/* Perform a FIEMAP copy, if possible.
+   Call ioctl(2) with FS_IOC_FIEMAP (available in linux 2.6.27) to
+   obtain a map of file extents excluding holes.  This avoids the
+   overhead of detecting holes in a hole-introducing/preserving copy,
+   and thus makes copying sparse files much more efficient.  Upon a
+   successful copy, return true.  If the initial ioctl fails, set
+   *NORMAL_COPY_REQUIRED to true and return false.  Upon any other
+   failure, set *NORMAL_COPY_REQUIRED to false and return false.  */
+static bool
+fiemap_copy (int src_fd, int dest_fd, size_t buf_size,
+             off_t src_total_size, char const *src_name,
+             char const *dst_name, bool *normal_copy_required)
+{
+  bool last = false;
+  union { struct fiemap f; char c[4096]; } fiemap_buf;
+  struct fiemap *fiemap = &fiemap_buf.f;
+  struct fiemap_extent *fm_ext = &fiemap->fm_extents[0];
+  enum { count = (sizeof fiemap_buf - sizeof *fiemap) / sizeof *fm_ext };
+  verify (count != 0);
+
+  off_t last_ext_logical = 0;
+  uint64_t last_ext_len = 0;
+  uint64_t last_read_size = 0;
+  unsigned int i = 0;
+  *normal_copy_required = false;
+
+  /* This is required at least to initialize fiemap->fm_start,
+     but also serves (in mid 2010) to appease valgrind, which
+     appears not to know the semantics of the FIEMAP ioctl. */
+  memset (&fiemap_buf, 0, sizeof fiemap_buf);
+
+  do
+    {
+      fiemap->fm_length = FIEMAP_MAX_OFFSET;
+      fiemap->fm_flags = FIEMAP_FLAG_SYNC;
+      fiemap->fm_extent_count = count;
+
+      /* When ioctl(2) fails, fall back to the normal copy only if it
+         is the first time we met.  */
+      if (ioctl (src_fd, FS_IOC_FIEMAP, fiemap) < 0)
+        {
+          /* If the first ioctl fails, tell the caller that it is
+             ok to proceed with a normal copy.  */
+          if (i == 0)
+            *normal_copy_required = true;
+          else
+            {
+              /* If the second or subsequent ioctl fails, diagnose it,
+                 since it ends up causing the entire copy/cp to fail.  */
+              error (0, errno, _("%s: FIEMAP ioctl failed"), quote (src_name));
+            }
+          return false;
+        }
+
+      /* If 0 extents are returned, then more ioctls are not needed.  */
+      if (fiemap->fm_mapped_extents == 0)
+        break;
+
+      for (i = 0; i < fiemap->fm_mapped_extents; i++)
+        {
+          assert (fm_ext[i].fe_logical <= OFF_T_MAX);
+
+          off_t ext_logical = fm_ext[i].fe_logical;
+          uint64_t ext_len = fm_ext[i].fe_length;
+
+          if (lseek (src_fd, ext_logical, SEEK_SET) < 0)
+            {
+              error (0, errno, _("cannot lseek %s"), quote (src_name));
+              return false;
+            }
+
+          if (lseek (dest_fd, ext_logical, SEEK_SET) < 0)
+            {
+              error (0, errno, _("cannot lseek %s"), quote (dst_name));
+              return false;
+            }
+
+          if (fm_ext[i].fe_flags & FIEMAP_EXTENT_LAST)
+            {
+              last_ext_logical = ext_logical;
+              last_ext_len = ext_len;
+              last = true;
+            }
+
+          while (ext_len)
+            {
+              char buf[buf_size];
+
+              /* Avoid reading into the holes if the left extent
+                 length is shorter than the buffer size.  */
+              if (ext_len < buf_size)
+                buf_size = ext_len;
+
+              ssize_t n_read = read (src_fd, buf, buf_size);
+              if (n_read < 0)
+                {
+#ifdef EINTR
+                  if (errno == EINTR)
+                    continue;
+#endif
+                  error (0, errno, _("reading %s"), quote (src_name));
+                  return false;
+                }
+
+              if (n_read == 0)
+                {
+                  /* Figure out how many bytes read from the last extent.  */
+                  last_read_size = last_ext_len - ext_len;
+                  break;
+                }
+
+              if (full_write (dest_fd, buf, n_read) != n_read)
+                {
+                  error (0, errno, _("writing %s"), quote (dst_name));
+                  return false;
+                }
+
+              ext_len -= n_read;
+            }
+        }
+
+      fiemap->fm_start = fm_ext[i - 1].fe_logical + fm_ext[i - 1].fe_length;
+
+    } while (! last);
+
+  /* If a file ends up with holes, the sum of the last extent logical offset
+     and the read-returned size will be shorter than the actual size of the
+     file.  Use ftruncate to extend the length of the destination file.  */
+  if (last_ext_logical + last_read_size < src_total_size)
+    {
+      if (ftruncate (dest_fd, src_total_size) < 0)
+        {
+          error (0, errno, _("failed to extend %s"), quote (dst_name));
+          return false;
+        }
+    }
+
+  return true;
+}
+#else
+static bool fiemap_copy (ignored) { errno == ENOTSUP; return false; }
+>>>>>>> fiemap-copy
 #endif
 
 /* FIXME: describe */
@@ -1320,6 +1478,25 @@ copy_reg (char const *src_name, char const *dst_name,
 
       fdadvise (source_desc, 0, 0, FADVISE_SEQUENTIAL);
 
+      if (make_holes)
+        {
+          bool require_normal_copy;
+          /* Perform efficient FIEMAP copy for sparse files, fall back to the
+             standard copy only if the ioctl(2) fails.  */
+          if (fiemap_copy (source_desc, dest_desc, buf_size,
+                           src_open_sb.st_size, src_name,
+                           dst_name, &require_normal_copy))
+            goto preserve_metadata;
+          else
+            {
+              if (! require_normal_copy)
+                {
+                  return_val = false;
+                  goto close_src_and_dst_desc;
+                }
+            }
+        }
+
       /* If not making a sparse file, try to use a more-efficient
          buffer size.  */
       if (! make_holes)
@@ -1374,6 +1551,7 @@ copy_reg (char const *src_name, char const *dst_name,
         }
     }
 
+preserve_metadata:
   if (x->preserve_timestamps)
     {
       struct timespec timespec[2];
@@ -1954,6 +2132,7 @@ copy_internal (char const *src_name, char const *dst_name,
   bool restore_dst_mode = false;
   char *earlier_file = NULL;
   char *dst_backup = NULL;
+  char const *drelname = *dst_relname ? dst_relname : ".";
   bool delayed_ok;
   bool copied_as_regular = false;
   bool dest_is_symlink = false;
@@ -1971,7 +2150,7 @@ copy_internal (char const *src_name, char const *dst_name,
   if (x->move_mode)
     {
       if (rename_errno < 0)
-        rename_errno = (renameatu (AT_FDCWD, src_name, dst_dirfd, dst_relname,
+        rename_errno = (renameatu (AT_FDCWD, src_name, dst_dirfd, drelname,
                                    RENAME_NOREPLACE)
                         ? errno : 0);
       nonexistent_dst = *rename_succeeded = new_dst = rename_errno == 0;
@@ -1983,7 +2162,7 @@ copy_internal (char const *src_name, char const *dst_name,
     {
       char const *name = rename_errno == 0 ? dst_name : src_name;
       int dirfd = rename_errno == 0 ? dst_dirfd : AT_FDCWD;
-      char const *relname = rename_errno == 0 ? dst_relname : src_name;
+      char const *relname = rename_errno == 0 ? drelname : src_name;
       int fstatat_flags
         = x->dereference == DEREF_NEVER ? AT_SYMLINK_NOFOLLOW : 0;
       if (follow_fstatat (dirfd, relname, &src_sb, fstatat_flags) != 0)
@@ -2051,8 +2230,7 @@ copy_internal (char const *src_name, char const *dst_name,
           int fstatat_flags = use_lstat ? AT_SYMLINK_NOFOLLOW : 0;
           if (!use_lstat && nonexistent_dst < 0)
             new_dst = true;
-          else if (follow_fstatat (dst_dirfd, dst_relname, &dst_sb,
-                                   fstatat_flags)
+          else if (follow_fstatat (dst_dirfd, drelname, &dst_sb, fstatat_flags)
                    == 0)
             {
               have_dst_lstat = use_lstat;
@@ -2077,7 +2255,7 @@ copy_internal (char const *src_name, char const *dst_name,
           bool return_now = false;
 
           if (x->interactive != I_ALWAYS_NO
-              && ! same_file_ok (src_name, &src_sb, dst_dirfd, dst_relname,
+              && ! same_file_ok (src_name, &src_sb, dst_dirfd, drelname,
                                  &dst_sb, x, &return_now))
             {
               error (0, 0, _("%s and %s are the same file"),
@@ -2140,7 +2318,7 @@ copy_internal (char const *src_name, char const *dst_name,
              cp and mv treat -i and -f differently.  */
           if (x->move_mode)
             {
-              if (abandon_move (x, dst_name, dst_dirfd, dst_relname, &dst_sb))
+              if (abandon_move (x, dst_name, dst_dirfd, drelname, &dst_sb))
                 {
                   /* Pretend the rename succeeded, so the caller (mv)
                      doesn't end up removing the source file.  */
@@ -2321,14 +2499,11 @@ copy_internal (char const *src_name, char const *dst_name,
          Otherwise, use AT_SYMLINK_NOFOLLOW, in case dst_name is a symlink.  */
       if (have_dst_lstat)
         dst_lstat_sb = &dst_sb;
+      else if (fstatat (dst_dirfd, drelname, &tmp_buf, AT_SYMLINK_NOFOLLOW)
+               == 0)
+        dst_lstat_sb = &tmp_buf;
       else
-        {
-          if (fstatat (dst_dirfd, dst_relname, &tmp_buf,
-                       AT_SYMLINK_NOFOLLOW) == 0)
-            dst_lstat_sb = &tmp_buf;
-          else
-            lstat_ok = false;
-        }
+        lstat_ok = false;
 
       /* Never copy through a symlink we've just created.  */
       if (lstat_ok
@@ -2475,8 +2650,7 @@ copy_internal (char const *src_name, char const *dst_name,
   if (x->move_mode)
     {
       if (rename_errno == EEXIST)
-        rename_errno = ((renameat (AT_FDCWD, src_name, dst_dirfd, dst_relname)
-                         == 0)
+        rename_errno = (renameat (AT_FDCWD, src_name, dst_dirfd, drelname) == 0
                         ? 0 : errno);
 
       if (rename_errno == 0)
@@ -2576,7 +2750,7 @@ copy_internal (char const *src_name, char const *dst_name,
          or not, and this is enforced above.  Therefore we check the src_mode
          and operate on dst_name here as a tighter constraint and also because
          src_mode is readily available here.  */
-      if ((unlinkat (dst_dirfd, dst_relname,
+      if ((unlinkat (dst_dirfd, drelname,
                      S_ISDIR (src_mode) ? AT_REMOVEDIR : 0)
            != 0)
           && errno != ENOENT)
@@ -2646,7 +2820,7 @@ copy_internal (char const *src_name, char const *dst_name,
              to ask mkdir to copy all the CHMOD_MODE_BITS, letting mkdir
              decide what to do with S_ISUID | S_ISGID | S_ISVTX.  */
           mode_t mode = dst_mode_bits & ~omitted_permissions;
-          if (mkdirat (dst_dirfd, dst_relname, mode) != 0)
+          if (mkdirat (dst_dirfd, drelname, mode) != 0)
             {
               error (0, errno, _("cannot create directory %s"),
                      quoteaf (dst_name));
@@ -2657,8 +2831,7 @@ copy_internal (char const *src_name, char const *dst_name,
              for writing the directory's contents. Check if these
              permissions are there.  */
 
-          if (fstatat (dst_dirfd, dst_relname, &dst_sb,
-                       AT_SYMLINK_NOFOLLOW) != 0)
+          if (fstatat (dst_dirfd, drelname, &dst_sb, AT_SYMLINK_NOFOLLOW) != 0)
             {
               error (0, errno, _("cannot stat %s"), quoteaf (dst_name));
               goto un_backup;
@@ -2670,7 +2843,7 @@ copy_internal (char const *src_name, char const *dst_name,
               dst_mode = dst_sb.st_mode;
               restore_dst_mode = true;
 
-              if (lchmodat (dst_dirfd, dst_relname, dst_mode | S_IRWXU) != 0)
+              if (lchmodat (dst_dirfd, drelname, dst_mode | S_IRWXU) != 0)
                 {
                   error (0, errno, _("setting permissions for %s"),
                          quoteaf (dst_name));
@@ -2924,7 +3097,7 @@ copy_internal (char const *src_name, char const *dst_name,
       /* Now that the destination file is very likely to exist,
          add its info to the set.  */
       struct stat sb;
-      if (fstatat (dst_dirfd, dst_relname, &sb, AT_SYMLINK_NOFOLLOW) == 0)
+      if (fstatat (dst_dirfd, drelname, &sb, AT_SYMLINK_NOFOLLOW) == 0)
         record_file (x->dest_info, dst_relname, &sb);
     }
 
@@ -2957,7 +3130,7 @@ copy_internal (char const *src_name, char const *dst_name,
       timespec[1] = get_stat_mtime (&src_sb);
 
       int utimensat_flags = dest_is_symlink ? AT_SYMLINK_NOFOLLOW : 0;
-      if (utimensat (dst_dirfd, dst_relname, timespec, utimensat_flags) != 0)
+      if (utimensat (dst_dirfd, drelname, timespec, utimensat_flags) != 0)
         {
           error (0, errno, _("preserving times for %s"), quoteaf (dst_name));
           if (x->require_preserve)
@@ -2969,7 +3142,7 @@ copy_internal (char const *src_name, char const *dst_name,
   if (!dest_is_symlink && x->preserve_ownership
       && (new_dst || !SAME_OWNER_AND_GROUP (src_sb, dst_sb)))
     {
-      switch (set_owner (x, dst_name, dst_dirfd, dst_relname, -1,
+      switch (set_owner (x, dst_name, dst_dirfd, drelname, -1,
                          &src_sb, new_dst, &dst_sb))
         {
         case -1:
@@ -3024,8 +3197,9 @@ copy_internal (char const *src_name, char const *dst_name,
                  the lstat, but deducing the current destination mode
                  is tricky in the presence of implementation-defined
                  rules for special mode bits.  */
-              if (new_dst && fstatat (dst_dirfd, dst_relname, &dst_sb,
-                                     AT_SYMLINK_NOFOLLOW) != 0)
+              if (new_dst && (fstatat (dst_dirfd, drelname, &dst_sb,
+                                       AT_SYMLINK_NOFOLLOW)
+                              != 0))
                 {
                   error (0, errno, _("cannot stat %s"), quoteaf (dst_name));
                   return false;
@@ -3038,7 +3212,7 @@ copy_internal (char const *src_name, char const *dst_name,
 
       if (restore_dst_mode)
         {
-          if (lchmodat (dst_dirfd, dst_relname, dst_mode | omitted_permissions)
+          if (lchmodat (dst_dirfd, drelname, dst_mode | omitted_permissions)
               != 0)
             {
               error (0, errno, _("preserving permissions for %s"),
@@ -3068,7 +3242,7 @@ un_backup:
   if (dst_backup)
     {
       char const *dst_relbackup = &dst_backup[dst_relname - dst_name];
-      if (renameat (dst_dirfd, dst_relbackup, dst_dirfd, dst_relname) != 0)
+      if (renameat (dst_dirfd, dst_relbackup, dst_dirfd, drelname) != 0)
         error (0, errno, _("cannot un-backup %s"), quoteaf (dst_name));
       else
         {
